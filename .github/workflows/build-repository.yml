@@ -15,12 +15,12 @@ jobs:
 
     steps:
       - name: Check out repository host
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           path: repository.mdblist
 
       - name: Check out MDBList Scrobbler
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: linaspurinis/kodi-mdblist-scrobbler
           path: kodi-mdblist-scrobbler
