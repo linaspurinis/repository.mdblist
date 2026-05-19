@@ -1,0 +1,52 @@
+name: Build Kodi repository
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types:
+      - addon-release
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository host
+        uses: actions/checkout@v4
+        with:
+          path: repository.mdblist
+
+      - name: Check out MDBList Scrobbler
+        uses: actions/checkout@v4
+        with:
+          repository: linaspurinis/kodi-mdblist-scrobbler
+          path: kodi-mdblist-scrobbler
+
+      - name: Build Kodi repository files
+        working-directory: repository.mdblist
+        run: python3 scripts/build_repo.py
+
+      - name: Commit generated repository files
+        working-directory: repository.mdblist
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet -- .; then
+            echo "No repository changes to commit."
+            exit 0
+          fi
+
+          addon_version="$(python3 - <<'PY'
+          from xml.etree import ElementTree as ET
+          root = ET.parse('repo/service.mdblist-scrobbler/addon.xml').getroot()
+          print(root.attrib['version'])
+          PY
+          )"
+
+          git add .
+          git commit -m "Update MDBList Scrobbler to ${addon_version}"
+          git push

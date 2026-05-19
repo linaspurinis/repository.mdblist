@@ -18,3 +18,9 @@ python3 scripts/build_repo.py
 ```
 
 The build script copies `service.mdblist-scrobbler` from the sibling `kodi-mdblist-scrobbler` checkout, creates Kodi zip packages, writes `addons.xml`, writes `addons.xml.md5`, and copies the repository installer zip to the repository root.
+
+## Build with GitHub Actions
+
+After pushing a new `service.mdblist-scrobbler` version, open this repository on GitHub and run **Actions > Build Kodi repository > Run workflow**.
+
+The workflow checks out both repositories, runs `python3 scripts/build_repo.py`, and commits the regenerated Kodi repository files when they changed.
