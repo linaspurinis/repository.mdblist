@@ -22,6 +22,7 @@ COPY_PATHS = [
     "CHANGELOG.md",
     "icon.png",
     "LICENSE",
+    "mdblist-kodi.png",
     "plugin.py",
     "README.md",
     "resources",
