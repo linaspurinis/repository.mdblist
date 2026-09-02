@@ -6,7 +6,8 @@ import xbmc
 import xbmcaddon
 import xbmcgui
 
-from resources.lib import oauth
+from resources.lib import oauth, ratings_sync, sync_orchestrator
+from resources.lib.mdblist_api import MDBListApiError
 from resources.lib.timer import Timer
 from resources.lib.utils import jsonrpc_request, fix_unique_ids
 
@@ -75,7 +76,7 @@ class PlayerMonitor(xbmc.Player):
             )
             return default
 
-    def build_payload(self, event: str):
+    def build_payload(self, event: str, use_cached_time: bool = False):
         if not self.video_info:
             return None
 
@@ -94,8 +95,12 @@ class PlayerMonitor(xbmc.Player):
             xbmc.log("MDBList Scrobbler: Scrobbling disabled for media type '{}'".format(media_type), level=xbmc.LOGDEBUG)
             return None
 
-        total_time = self.getTotalTime() if self.isPlaying() else self.total_time
-        current_time = self.getTime() if self.isPlaying() else self.current_time
+        if use_cached_time:
+            total_time = self.total_time
+            current_time = self.current_time
+        else:
+            total_time = self.getTotalTime() if self.isPlaying() else self.total_time
+            current_time = self.getTime() if self.isPlaying() else self.current_time
 
         if total_time is not None:
             if total_time < 0:
@@ -158,12 +163,12 @@ class PlayerMonitor(xbmc.Player):
 
         return None
 
-    def send_request(self, event: str):
+    def send_request(self, event: str, use_cached_time: bool = False):
         if not self.get_bool_setting("event.{}".format(event), True):
             xbmc.log("MDBList Scrobbler: Event '{}' disabled in settings, skipping".format(event), level=xbmc.LOGDEBUG)
             return
 
-        json_data = self.build_payload(event)
+        json_data = self.build_payload(event, use_cached_time=use_cached_time)
         if not json_data:
             return
 
@@ -415,6 +420,29 @@ class PlayerMonitor(xbmc.Player):
 
         return round((current_time / int(self.total_time)) * 100, 2)
 
+    def finalize_previous_playback_on_transition(self):
+        if not self.video_info:
+            return
+
+        self.stop_interval_timer()
+        progress_percent = self.get_progress_percent()
+        if progress_percent is None or progress_percent <= 0:
+            xbmc.log(
+                "MDBList Scrobbler: Previous playback state found before new playback, but cached progress is unavailable or zero",
+                level=xbmc.LOGDEBUG,
+            )
+            return
+
+        xbmc.log(
+            "MDBList Scrobbler: Finalizing previous playback before new playback starts (progress={})".format(
+                progress_percent
+            ),
+            level=xbmc.LOGDEBUG,
+        )
+        self.send_request("stop", use_cached_time=True)
+        self.prompt_for_rating("stop")
+        self.video_info = {}
+
     def should_prompt_for_rating(self, playback_event: str):
         if self.rating_prompt_shown or not self.video_info:
             return False
@@ -444,8 +472,8 @@ class PlayerMonitor(xbmc.Player):
             return False
 
         if library_id in (None, -1):
-            if not self.get_bool_setting("rating.save.mdblist", False):
-                xbmc.log("MDBList Scrobbler: Skipping rating prompt, item is not in Kodi library and MDBList rating disabled", level=xbmc.LOGDEBUG)
+            if not self.get_bool_setting("sync.ratings.enabled", False):
+                xbmc.log("MDBList Scrobbler: Skipping rating prompt, item is not in Kodi library and ratings sync is disabled", level=xbmc.LOGDEBUG)
                 return False
             xbmc.log("MDBList Scrobbler: Item not in Kodi library, Kodi rating will be skipped but MDBList rating can proceed", level=xbmc.LOGDEBUG)
 
@@ -498,7 +526,7 @@ class PlayerMonitor(xbmc.Player):
             return False
 
     def save_mdblist_rating(self, rating: int):
-        if not self.get_bool_setting("rating.save.mdblist", False):
+        if not self.get_bool_setting("sync.ratings.enabled", False):
             return False
 
         media_type = self.video_info.get("type")
@@ -508,7 +536,7 @@ class PlayerMonitor(xbmc.Player):
             if not movie_ids:
                 xbmc.log("MDBList Scrobbler: Cannot rate movie on MDBList, no supported IDs", level=xbmc.LOGWARNING)
                 return False
-            payload = {"movies": [{"ids": movie_ids, "rating": rating}]}
+            record = {"dbtype": "movie", "ids": movie_ids, "userrating": rating}
         elif media_type == "episode":
             show_ids = fix_unique_ids(self.video_info.get("tvshow", {}).get("uniqueid", {}), "episode")
             if not show_ids:
@@ -516,42 +544,26 @@ class PlayerMonitor(xbmc.Player):
             if not show_ids:
                 xbmc.log("MDBList Scrobbler: Cannot rate episode on MDBList, no supported show IDs", level=xbmc.LOGWARNING)
                 return False
-            payload = {
-                "shows": [{
-                    "ids": show_ids,
-                    "seasons": [{
-                        "number": self.video_info.get("season"),
-                        "episodes": [{"number": self.video_info.get("episode"), "rating": rating}]
-                    }]
-                }]
+            record = {
+                "dbtype": "episode", "show_ids": show_ids,
+                "season": self.video_info.get("season"), "episode": self.video_info.get("episode"),
+                "userrating": rating,
             }
         else:
             return False
 
-        access_token = oauth.ensure_valid_token()
-        apikey = "" if access_token else self.get_string_setting("apikey")
-
-        if not access_token and not apikey:
-            xbmc.log("MDBList Scrobbler: Cannot rate on MDBList, not authenticated", level=xbmc.LOGERROR)
-            return False
-
-        if access_token:
-            url = "{}/sync/ratings".format(DEFAULT_BASE_URL)
-            headers = {"Authorization": "Bearer {}".format(access_token)}
-        else:
-            url = "{}/sync/ratings?apikey={}".format(DEFAULT_BASE_URL, apikey)
-            headers = None
-
-        try:
-            response = requests.post(url, json=payload, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
-            if response.status_code >= 400:
-                xbmc.log("MDBList Scrobbler: MDBList rating error {} response={}".format(
-                    response.status_code, response.text[:200]), level=xbmc.LOGERROR)
+        with sync_orchestrator.try_lock() as acquired:
+            if not acquired:
+                # A sync is in progress -- skip rather than race it. The
+                # rating still reaches MDBList via the next periodic push()
+                # backfill diff, so this isn't lost, just deferred.
                 return False
-            return True
-        except requests.exceptions.RequestException as exception:
-            xbmc.log("MDBList Scrobbler: MDBList rating request failed - {}".format(str(exception)), level=xbmc.LOGERROR)
-            return False
+            try:
+                result = ratings_sync.push_single(record)
+                return result is not False
+            except MDBListApiError as exception:
+                xbmc.log("MDBList Scrobbler: MDBList rating request failed - {}".format(str(exception)), level=xbmc.LOGERROR)
+                return False
 
     def prompt_for_rating(self, playback_event: str):
         if not self.should_prompt_for_rating(playback_event):
@@ -578,6 +590,7 @@ class PlayerMonitor(xbmc.Player):
     def onAVStarted(self):
         xbmc.log("MDBList Scrobbler: onAVStarted", level=xbmc.LOGDEBUG)
         self.load_settings()
+        self.finalize_previous_playback_on_transition()
         self.reset_playback_state()
         self.fetch_video_info()
         self.update_time()
