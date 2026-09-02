@@ -78,7 +78,12 @@ def request(method: str, endpoint: str, params=None, json_data=None):
     try:
         return response.json()
     except ValueError:
-        return {}
+        # A 200 with an unparseable body is a real failure, not "no data" --
+        # callers read the result with .get() and treat a missing key as
+        # legitimately absent (no items, no server_time, etc.), so silently
+        # returning {} here would be indistinguishable from a genuinely
+        # empty-but-valid response.
+        raise MDBListApiError("Invalid response from {}".format(endpoint))
 
 
 def fetch_watchlist(mediatype=None, limit=100):
@@ -191,4 +196,11 @@ def fetch_journal(since=None, limit=1000):
 
 def fetch_last_activities():
     data = request("GET", "/sync/last_activities")
-    return data if isinstance(data, dict) else {}
+    # server_time is always present in a real response -- every caller uses
+    # it as the next sync watermark, so a response that parsed but doesn't
+    # have it (wrong shape, unexpected body) needs to abort the pull rather
+    # than let watched_sync/ratings_sync silently fall back to the device's
+    # own clock.
+    if not isinstance(data, dict) or "server_time" not in data:
+        raise MDBListApiError("Malformed response from /sync/last_activities")
+    return data
